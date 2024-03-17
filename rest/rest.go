@@ -13,9 +13,34 @@ import (
 	"golang.org/x/net/webdav"
 )
 
+// A simple webdav.FileSystem implementation that simplifies working with REST interfaces
 type RESTFileSystem struct {
 	API FileRESTAPI
 }
+
+
+
+type FileRESTAPI interface {
+	GetContent(ctx context.Context, name string) (io.ReadCloser, error)
+	Stat(ctx context.Context, name string) (fs.FileInfo, error)
+	GetChildren(ctx context.Context, name string) ([]fs.FileInfo, error)
+	MkDir(ctx context.Context, name string, perm os.FileMode) error
+	Update(ctx context.Context, name string, rc io.Reader) error
+	NewFile(ctx context.Context, name string, rc io.Reader) error
+	RemoveAll(ctx context.Context, name string) error
+	Rename(ctx context.Context, oldname string, newname string) error
+}
+
+type File struct {
+	isNew    bool
+	info     fs.FileInfo
+	tempFile *os.File
+	api      FileRESTAPI
+	name     string
+	flag     int
+	perm     os.FileMode
+}
+
 
 // ReadDir reads the named directory
 // and returns a list of directory entries sorted by filename.
@@ -37,6 +62,7 @@ func (restfilesystem *RESTFileSystem) Open(name string) (fs.File, error) {
 	return restfilesystem.OpenFile(context.Background(), name, os.O_RDONLY, 0)
 }
 
+// Create a new directory 
 func (restfilesystem *RESTFileSystem) Mkdir(ctx context.Context, name string, perm os.FileMode) error {
 	return restfilesystem.API.MkDir(ctx, name, perm)
 }
@@ -168,27 +194,6 @@ func (restfilesystem *RESTFileSystem) Stat(ctx context.Context, name string) (os
 	return restfilesystem.API.Stat(ctx, name)
 }
 
-type FileRESTAPI interface {
-	GetContent(ctx context.Context, name string) (io.ReadCloser, error)
-	Stat(ctx context.Context, name string) (fs.FileInfo, error)
-	GetChildren(ctx context.Context, name string) ([]fs.FileInfo, error)
-	MkDir(ctx context.Context, name string, perm os.FileMode) error
-	Update(ctx context.Context, name string, rc io.Reader) error
-	NewFile(ctx context.Context, name string, rc io.Reader) error
-	RemoveAll(ctx context.Context, name string) error
-	Rename(ctx context.Context, oldname string, newname string) error
-}
-
-type File struct {
-	isNew    bool
-	info     fs.FileInfo
-	tempFile *os.File
-	api      FileRESTAPI
-	name     string
-	flag     int
-	perm     os.FileMode
-}
-
 // ReadDir reads the contents of the directory and returns
 // a slice of up to n DirEntry values in directory order.
 // Subsequent calls on the same file will yield further DirEntry values.
@@ -268,3 +273,10 @@ func (file *File) Readdir(count int) ([]fs.FileInfo, error) {
 func (file *File) Stat() (fs.FileInfo, error) {
 	return file.info, nil
 }
+
+// guards to ensure that everything works
+var _ webdav.FileSystem = &RESTFileSystem{}
+var _ webdav.File = &File{}
+var _ fs.FS = &RESTFileSystem{}
+var _ fs.ReadDirFS = &RESTFileSystem{}
+var _ fs.ReadDirFile = &File{}

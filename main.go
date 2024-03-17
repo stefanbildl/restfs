@@ -15,7 +15,6 @@ import (
 )
 
 func main() {
-
 	filesystem := &rest.RESTFileSystem{
 		API: &MockAPI{
 			dir: "mock",
@@ -43,25 +42,27 @@ func main() {
 		},
 	}
 
+
 	httpfs := http.FileServerFS(filesystem)
 
 	http.Handle("/dav/", &h)
 	http.Handle("/", httpfs)
 
-	http.ListenAndServe(":5555", nil)
+	if err := http.ListenAndServe(":5555", nil); err != nil {
+		panic(err)
+	}
 }
 
 type File interface {
 	webdav.File
 }
 
+// Mock Implementation! Uses a webdav.Dir
 type MockAPI struct {
 	dir webdav.Dir
 }
 
-// NewFile implements rest.FileRESTAPI.
 func (mockapi *MockAPI) NewFile(ctx context.Context, name string, rc io.Reader) error {
-
 	buf, err := io.ReadAll(rc)
 
 	fmt.Printf("Writing new FILE (%s):\n", name)
@@ -97,6 +98,7 @@ func (mockapi *MockAPI) MkDir(ctx context.Context, name string, perm os.FileMode
 	fmt.Printf("mkdir (%s)\n", name)
 	return mockapi.dir.Mkdir(ctx, name, perm)
 }
+
 func (mockapi *MockAPI) Update(ctx context.Context, name string, rc io.Reader) error {
 	fmt.Printf("update (%s)\n", name)
 	buf, err := io.ReadAll(rc)
@@ -114,6 +116,7 @@ func (mockapi *MockAPI) Update(ctx context.Context, name string, rc io.Reader) e
 	fmt.Printf("\nDONE\n")
 	return nil
 }
+
 func (mockapi *MockAPI) RemoveAll(ctx context.Context, name string) error {
 	fmt.Printf("remove (%s)\n", name)
 	return mockapi.dir.RemoveAll(ctx, name)
