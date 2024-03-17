@@ -69,8 +69,6 @@ func (restfilesystem *RESTFileSystem) OpenFile(
 	// is a new file
 	// create temp file to store the contents
 
-
-
 	err = os.MkdirAll("tmp", 0777)
 	if err != nil {
 		return nil, err
@@ -100,10 +98,10 @@ func (restfilesystem *RESTFileSystem) OpenFile(
 
 	if fileInfo == nil {
 		fileInfo = &NewFileInfo{
-			name: filepath.Base(name),
+			name:     filepath.Base(name),
 			tempFile: tmpFile,
-			mode: perm,
-			isDir: false,
+			mode:     perm,
+			isDir:    false,
 		}
 	}
 

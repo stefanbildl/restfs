@@ -17,24 +17,23 @@ import (
 func main() {
 
 	filesystem := &rest.RESTFileSystem{
-			API: &MockAPI{
-				dir: "mock",
-			},
-		};
+		API: &MockAPI{
+			dir: "mock",
+		},
+	}
 
 	fmt.Println("Contents:")
 	fmt.Println("=========")
 
 	fs.WalkDir(filesystem, "/", func(path string, d fs.DirEntry, err error) error {
-		fmt.Println(path);
+		fmt.Println(path)
 		return nil
 	})
-
 
 	h := webdav.Handler{
 		LockSystem: webdav.NewMemLS(),
 		FileSystem: filesystem,
-		Prefix: "/dav/",
+		Prefix:     "/dav/",
 		Logger: func(r *http.Request, err error) {
 			if err != nil {
 				if !errors.Is(err, fs.ErrNotExist) {
