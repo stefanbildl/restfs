@@ -37,7 +37,6 @@ func (restfilesystem *RESTFileSystem) Open(name string) (fs.File, error) {
 	return restfilesystem.OpenFile(context.Background(), name, os.O_RDONLY, 0)
 }
 
-
 func (restfilesystem *RESTFileSystem) Mkdir(ctx context.Context, name string, perm os.FileMode) error {
 	return restfilesystem.API.MkDir(ctx, name, perm)
 }
@@ -48,60 +47,29 @@ func (restfilesystem *RESTFileSystem) OpenFile(
 	flag int,
 	perm os.FileMode,
 ) (webdav.File, error) {
-
 	fileInfo, err := restfilesystem.API.Stat(ctx, name)
 
-	if err != nil && (!errors.Is(err, fs.ErrNotExist) || (flag&os.O_CREATE) == 0) {
+	exists := !errors.Is(err, fs.ErrNotExist)
+
+	if err != nil && (exists || (flag&os.O_CREATE) == 0) {
 		return nil, err
 	}
 
-	// is a new file
-	if fileInfo == nil {
-
-		err := os.MkdirAll("tmp", 0777)
-		if err != nil {
-			return nil, err
-		}
-
-		tmpFile, err := os.CreateTemp("tmp", strings.ReplaceAll(name, "/", "_")+"*")
-		if err != nil {
-			return nil, err
-		}
-		tmpFile.Close()
-		f, err := os.OpenFile(tmpFile.Name(), flag, perm)
-		if err != nil {
-			return nil, err
-		}
-
-		fname := filepath.Base(name)
+	if fileInfo != nil && fileInfo.IsDir() {
 		return &File{
-			info:     &NewFileInfo{tempFile: f, name: fname, mode: perm, isDir: false},
-			tempFile: f,
-			api:      restfilesystem.API,
-			name:     name,
-			flag:     flag,
-			perm:     perm,
+			info:  fileInfo,
+			isNew: false,
+			api:   restfilesystem.API,
+			name:  name,
+			flag:  flag,
+			perm:  perm,
 		}, nil
 	}
 
-	f := File{
-		info: fileInfo,
-		api:  restfilesystem.API,
-		name: name,
-		flag: flag,
-		perm: perm,
-	}
-
-	if fileInfo.IsDir() {
-		return &f, nil
-	}
-
+	// is a new file
 	// create temp file to store the contents
-	rc, err := restfilesystem.API.GetContent(ctx, name)
-	if err != nil {
-		return nil, err
-	}
-	defer rc.Close()
+
+
 
 	err = os.MkdirAll("tmp", 0777)
 	if err != nil {
@@ -112,8 +80,17 @@ func (restfilesystem *RESTFileSystem) OpenFile(
 		return nil, err
 	}
 	defer tmpFile.Close()
-	io.Copy(tmpFile, rc)
-	rc.Close()
+
+	if exists {
+		rc, err := restfilesystem.API.GetContent(ctx, name)
+		if err != nil {
+			return nil, err
+		}
+		defer rc.Close()
+		io.Copy(tmpFile, rc)
+		rc.Close()
+	}
+
 	tmpFile.Close()
 
 	tmpFile, err = os.OpenFile(tmpFile.Name(), flag, perm)
@@ -121,8 +98,18 @@ func (restfilesystem *RESTFileSystem) OpenFile(
 		return nil, err
 	}
 
+	if fileInfo == nil {
+		fileInfo = &NewFileInfo{
+			name: filepath.Base(name),
+			tempFile: tmpFile,
+			mode: perm,
+			isDir: false,
+		}
+	}
+
 	return &File{
 		tempFile: tmpFile,
+		isNew:    !exists,
 		flag:     flag,
 		perm:     perm,
 		info:     fileInfo,
@@ -141,6 +128,7 @@ type NewFileInfo struct {
 func (newfileinfo *NewFileInfo) Name() string {
 	return newfileinfo.name
 }
+
 func (newfileinfo *NewFileInfo) Size() int64 {
 	stat, err := newfileinfo.tempFile.Stat()
 	if err != nil {
@@ -153,6 +141,7 @@ func (newfileinfo *NewFileInfo) Size() int64 {
 func (newfileinfo *NewFileInfo) Mode() fs.FileMode {
 	return newfileinfo.mode
 }
+
 func (newfileinfo *NewFileInfo) ModTime() time.Time {
 	stat, err := newfileinfo.tempFile.Stat()
 	if err != nil {
@@ -160,9 +149,11 @@ func (newfileinfo *NewFileInfo) ModTime() time.Time {
 	}
 	return stat.ModTime()
 }
+
 func (newfileinfo *NewFileInfo) IsDir() bool {
 	return newfileinfo.isDir
 }
+
 func (newfileinfo *NewFileInfo) Sys() any {
 	return nil
 }
@@ -191,6 +182,7 @@ type FileRESTAPI interface {
 }
 
 type File struct {
+	isNew    bool
 	info     fs.FileInfo
 	tempFile *os.File
 	api      FileRESTAPI
@@ -239,7 +231,7 @@ func (file *File) Write(p []byte) (n int, err error) {
 }
 
 func (file *File) Close() error {
-	if file.info.IsDir() {
+	if file.info != nil && file.info.IsDir() {
 		return nil
 	}
 
@@ -254,7 +246,7 @@ func (file *File) Close() error {
 			return err
 		}
 		defer readFile.Close()
-		if file.flag&os.O_CREATE > 0 {
+		if file.isNew {
 			file.api.NewFile(context.Background(), file.name, readFile)
 		} else {
 			file.api.Update(context.Background(), file.name, readFile)
@@ -274,7 +266,6 @@ func (file *File) Close() error {
 func (file *File) Readdir(count int) ([]fs.FileInfo, error) {
 	return file.api.GetChildren(context.Background(), file.name)
 }
-
 
 func (file *File) Stat() (fs.FileInfo, error) {
 	return file.info, nil
