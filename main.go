@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -42,7 +41,6 @@ func main() {
 		},
 	}
 
-
 	httpfs := http.FileServerFS(filesystem)
 
 	http.Handle("/dav/", &h)
@@ -53,6 +51,7 @@ func main() {
 	}
 }
 
+
 type File interface {
 	webdav.File
 }
@@ -62,27 +61,21 @@ type MockAPI struct {
 	dir webdav.Dir
 }
 
-func (mockapi *MockAPI) NewFile(ctx context.Context, name string, rc io.Reader) error {
-	buf, err := io.ReadAll(rc)
-
+func (mockapi *MockAPI) NewFile(ctx context.Context, name string, r io.Reader) error {
 	fmt.Printf("Writing new FILE (%s):\n", name)
-	fmt.Println(string(buf))
 
 	f, err := mockapi.dir.OpenFile(ctx, name, os.O_CREATE|os.O_WRONLY, 0777)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	_, err = io.Copy(f, bytes.NewReader(buf))
-
-	fmt.Printf("\nDONE\n")
+	_, err = io.Copy(f, r)
 	return err
 }
 
 func (mockapi *MockAPI) GetContent(ctx context.Context, name string) (io.ReadCloser, error) {
 	return mockapi.dir.OpenFile(ctx, name, os.O_RDONLY, 0)
 }
-
 func (mockapi *MockAPI) Stat(ctx context.Context, name string) (fs.FileInfo, error) {
 	return mockapi.dir.Stat(ctx, name)
 }
@@ -101,15 +94,13 @@ func (mockapi *MockAPI) MkDir(ctx context.Context, name string, perm os.FileMode
 
 func (mockapi *MockAPI) Update(ctx context.Context, name string, rc io.Reader) error {
 	fmt.Printf("update (%s)\n", name)
-	buf, err := io.ReadAll(rc)
-	fmt.Println(string(buf))
 	f, err := mockapi.dir.OpenFile(ctx, name, os.O_WRONLY|os.O_TRUNC, 0)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 
-	_, err = io.Copy(f, bytes.NewReader(buf))
+	_, err = io.Copy(f, rc)
 	if err != nil {
 		return err
 	}

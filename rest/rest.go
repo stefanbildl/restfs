@@ -1,13 +1,15 @@
 package rest
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/webdav"
@@ -17,8 +19,6 @@ import (
 type RESTFileSystem struct {
 	API FileRESTAPI
 }
-
-
 
 type FileRESTAPI interface {
 	GetContent(ctx context.Context, name string) (io.ReadCloser, error)
@@ -32,22 +32,22 @@ type FileRESTAPI interface {
 }
 
 type File struct {
-	isNew    bool
-	info     fs.FileInfo
-	tempFile *os.File
-	api      FileRESTAPI
-	name     string
-	flag     int
-	perm     os.FileMode
+	mu    sync.Mutex
+	isNew bool
+	tf    *os.File
+	pos   int64
+	api   FileRESTAPI
+	name  string
+	flag  int
+	perm  os.FileMode
 }
-
 
 // ReadDir reads the named directory
 // and returns a list of directory entries sorted by filename.
 func (restfilesystem *RESTFileSystem) ReadDir(name string) ([]fs.DirEntry, error) {
 	fileInfos, err := restfilesystem.API.GetChildren(context.Background(), name)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("cannot readdir: %w", err)
 	}
 	var dirEntries []fs.DirEntry
 	for _, f := range fileInfos {
@@ -62,7 +62,7 @@ func (restfilesystem *RESTFileSystem) Open(name string) (fs.File, error) {
 	return restfilesystem.OpenFile(context.Background(), name, os.O_RDONLY, 0)
 }
 
-// Create a new directory 
+// Create a new directory
 func (restfilesystem *RESTFileSystem) Mkdir(ctx context.Context, name string, perm os.FileMode) error {
 	return restfilesystem.API.MkDir(ctx, name, perm)
 }
@@ -73,113 +73,22 @@ func (restfilesystem *RESTFileSystem) OpenFile(
 	flag int,
 	perm os.FileMode,
 ) (webdav.File, error) {
-	fileInfo, err := restfilesystem.API.Stat(ctx, name)
 
+	_, err := restfilesystem.API.Stat(ctx, name)
 	exists := !errors.Is(err, fs.ErrNotExist)
 
+	// some error occurs or it doesn't exist, yet and Create flag was not set
 	if err != nil && (exists || (flag&os.O_CREATE) == 0) {
-		return nil, err
-	}
-
-	if fileInfo != nil && fileInfo.IsDir() {
-		return &File{
-			info:  fileInfo,
-			isNew: false,
-			api:   restfilesystem.API,
-			name:  name,
-			flag:  flag,
-			perm:  perm,
-		}, nil
-	}
-
-	// is a new file
-	// create temp file to store the contents
-
-	err = os.MkdirAll("tmp", 0777)
-	if err != nil {
-		return nil, err
-	}
-	tmpFile, err := os.CreateTemp("tmp", strings.ReplaceAll(name, "/", "_")+"*")
-	if err != nil {
-		return nil, err
-	}
-	defer tmpFile.Close()
-
-	if exists {
-		rc, err := restfilesystem.API.GetContent(ctx, name)
-		if err != nil {
-			return nil, err
-		}
-		defer rc.Close()
-		io.Copy(tmpFile, rc)
-		rc.Close()
-	}
-
-	tmpFile.Close()
-
-	tmpFile, err = os.OpenFile(tmpFile.Name(), flag, perm)
-	if err != nil {
-		return nil, err
-	}
-
-	if fileInfo == nil {
-		fileInfo = &NewFileInfo{
-			name:     filepath.Base(name),
-			tempFile: tmpFile,
-			mode:     perm,
-			isDir:    false,
-		}
+		return nil, fmt.Errorf("error while opening file: %w", err)
 	}
 
 	return &File{
-		tempFile: tmpFile,
-		isNew:    !exists,
-		flag:     flag,
-		perm:     perm,
-		info:     fileInfo,
-		name:     name,
-		api:      restfilesystem.API,
+		isNew: !exists,
+		flag:  flag,
+		perm:  perm,
+		name:  name,
+		api:   restfilesystem.API,
 	}, nil
-}
-
-type NewFileInfo struct {
-	tempFile *os.File
-	name     string
-	mode     fs.FileMode
-	isDir    bool
-}
-
-func (newfileinfo *NewFileInfo) Name() string {
-	return newfileinfo.name
-}
-
-func (newfileinfo *NewFileInfo) Size() int64 {
-	stat, err := newfileinfo.tempFile.Stat()
-	if err != nil {
-		return 0
-	}
-
-	return stat.Size()
-}
-
-func (newfileinfo *NewFileInfo) Mode() fs.FileMode {
-	return newfileinfo.mode
-}
-
-func (newfileinfo *NewFileInfo) ModTime() time.Time {
-	stat, err := newfileinfo.tempFile.Stat()
-	if err != nil {
-		return time.Time{}
-	}
-	return stat.ModTime()
-}
-
-func (newfileinfo *NewFileInfo) IsDir() bool {
-	return newfileinfo.isDir
-}
-
-func (newfileinfo *NewFileInfo) Sys() any {
-	return nil
 }
 
 func (restfilesystem *RESTFileSystem) RemoveAll(ctx context.Context, name string) error {
@@ -194,23 +103,8 @@ func (restfilesystem *RESTFileSystem) Stat(ctx context.Context, name string) (os
 	return restfilesystem.API.Stat(ctx, name)
 }
 
-// ReadDir reads the contents of the directory and returns
-// a slice of up to n DirEntry values in directory order.
-// Subsequent calls on the same file will yield further DirEntry values.
-//
-// If n > 0, ReadDir returns at most n DirEntry structures.
-// In this case, if ReadDir returns an empty slice, it will return
-// a non-nil error explaining why.
-// At the end of a directory, the error is io.EOF.
-// (ReadDir must return io.EOF itself, not an error wrapping io.EOF.)
-//
-// If n <= 0, ReadDir returns all the DirEntry values from the directory
-// in a single slice. In this case, if ReadDir succeeds (reads all the way
-// to the end of the directory), it returns the slice and a nil error.
-// If it encounters an error before the end of the directory,
-// ReadDir returns the DirEntry list read until that point and a non-nil error.
-func (file *File) ReadDir(n int) ([]fs.DirEntry, error) {
-	fileInfos, err := file.Readdir(n)
+func (f *File) ReadDir(n int) ([]fs.DirEntry, error) {
+	fileInfos, err := f.Readdir(n)
 	var dirEntries []fs.DirEntry
 
 	if fileInfos != nil {
@@ -221,34 +115,174 @@ func (file *File) ReadDir(n int) ([]fs.DirEntry, error) {
 	return dirEntries, err
 }
 
-func (file *File) Seek(offset int64, whence int) (int64, error) {
-	return file.tempFile.Seek(offset, whence)
-}
+func (f *File) stat() fs.FileInfo {
+	s, err := f.api.Stat(context.Background(), f.name)
 
-func (file *File) Read(p []byte) (n int, err error) {
-	return file.tempFile.Read(p)
-}
-
-func (file *File) Write(p []byte) (n int, err error) {
-	return file.tempFile.Write(p)
-}
-
-func (file *File) Close() error {
-	if file.info != nil && file.info.IsDir() {
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error in stat: %v\n", err)
 		return nil
 	}
 
-	err := file.tempFile.Close()
+	return s
+}
+
+func (f *File) Size() int64 {
+	fi := f.stat()
+	if fi == nil {
+		return 0
+	}
+
+	return fi.Size()
+}
+
+func (f *File) Seek(offset int64, whence int) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.tf != nil {
+		ret, err := f.tf.Seek(offset, whence)
+		f.pos = ret
+		return ret, err
+	}
+
+	npos := f.pos
+
+	switch whence {
+	case io.SeekStart:
+		npos = offset
+	case io.SeekCurrent:
+		npos += offset
+	case io.SeekEnd:
+		npos = f.Size() + offset
+	default:
+		npos = -1
+	}
+	if npos < 0 {
+		return 0, os.ErrInvalid
+	}
+	f.pos = npos
+	return int64(f.pos), nil
+}
+
+func (f *File) tempFile() (*os.File, error) {
+	if f.tf != nil {
+		return f.tf, nil
+	}
+
+	err := os.MkdirAll("tmp", 0o777)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("cannot create tmp dir: %w", err)
+	}
+
+	tf, err := os.CreateTemp("tmp", strings.ReplaceAll(f.name, "/", "_")+"*")
+	if err != nil {
+		return nil, fmt.Errorf("cannot create tmp file: %w", err)
+	}
+
+	var size int64 = 0
+	if (f.flag&os.O_TRUNC) == 0 && !f.isNew {
+		rc, err := f.api.GetContent(context.Background(), f.name)
+		if err != nil {
+			return nil, err
+		}
+		defer rc.Close()
+		if size, err = io.Copy(tf, rc); err != nil {
+			return nil, err
+		}
+		rc.Close()
+	}
+
+	tf.Close()
+
+	f.tf, err = os.OpenFile(tf.Name(), f.flag, f.perm)
+	if f.flag&os.O_APPEND > 0 {
+		f.pos = size
+	}
+	return f.tf, err
+}
+
+func (f *File) Read(p []byte) (n int, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	tf, err := f.tempFile()
+	if err != nil {
+		return -1, err
+	}
+
+	n, err = tf.Read(p)
+	if err != nil {
+		return
+	}
+
+	f.pos += int64(n)
+	return
+}
+
+func (f *File) Write(p []byte) (n int, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	tf, err := f.tempFile()
+
+	if err != nil {
+		return -1, err
+	}
+
+	n, err = tf.Write(p)
+	if err != nil {
+		return
+	}
+
+	f.pos += int64(n)
+	return
+}
+
+func (file *File) Close() error {
+	file.mu.Lock()
+	defer file.mu.Unlock()
+
+	if file.tf != nil {
+		defer os.RemoveAll(file.tf.Name())
+		defer file.tf.Close()
+	}
+
+	if file.isNew {
+		var rc io.ReadCloser = io.NopCloser(bytes.NewReader([]byte{}))
+		var err error = nil
+
+		if file.tf != nil {
+			rc, err = os.Open(file.tf.Name())
+			if err != nil {
+				return fmt.Errorf("cannot open tempfile: %w", err)
+			}
+		}
+
+		defer rc.Close()
+		err = file.api.NewFile(context.Background(), file.name, rc)
+		if err != nil {
+			return err
+		}
+
+		err = rc.Close()
+		if err != nil {
+			return err
+		}
+
+		if err = file.tf.Close(); err != nil {
+			return fmt.Errorf("cannot close: %w", err)
+		}
+
+		return nil
 	}
 
 	if file.flag&(os.O_RDWR|os.O_WRONLY) > 0 {
-		readFile, err := os.OpenFile(file.tempFile.Name(), os.O_RDONLY, 0)
+		readFile, err := os.OpenFile(file.tf.Name(), os.O_RDONLY, 0)
 		if err != nil {
 			return err
 		}
 		defer readFile.Close()
+
 		if file.isNew {
 			file.api.NewFile(context.Background(), file.name, readFile)
 		} else {
@@ -258,11 +292,6 @@ func (file *File) Close() error {
 		readFile.Close()
 	}
 
-	err = os.RemoveAll(file.tempFile.Name())
-	if err != nil {
-		return err
-	}
-
 	return nil
 }
 
@@ -270,8 +299,42 @@ func (file *File) Readdir(count int) ([]fs.FileInfo, error) {
 	return file.api.GetChildren(context.Background(), file.name)
 }
 
-func (file *File) Stat() (fs.FileInfo, error) {
-	return file.info, nil
+func (f *File) Stat() (fs.FileInfo, error) {
+	if f.isNew && f.flag&os.O_CREATE > 0 {
+		return &newFileInfo{
+			t:    time.Now(),
+			name: f.name,
+			mode: f.perm,
+		}, nil
+	}
+
+	return f.api.Stat(context.Background(), f.name)
+}
+
+type newFileInfo struct {
+	name string
+	mode fs.FileMode
+	t    time.Time
+}
+
+func (newfileinfo *newFileInfo) Name() string {
+	return newfileinfo.name
+}
+func (newfileinfo *newFileInfo) Size() int64 {
+	return 0
+}
+func (newfileinfo *newFileInfo) Mode() fs.FileMode {
+	return newfileinfo.mode
+}
+
+func (newfileinfo *newFileInfo) ModTime() time.Time {
+	return newfileinfo.t
+}
+func (newfileinfo *newFileInfo) IsDir() bool {
+	return false
+}
+func (newfileinfo *newFileInfo) Sys() any {
+	return nil
 }
 
 // guards to ensure that everything works
